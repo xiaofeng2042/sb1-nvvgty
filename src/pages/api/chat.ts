@@ -1,38 +1,33 @@
+// 导入 Next.js 的类型定义
 import type { NextApiRequest, NextApiResponse } from 'next'
-import fetch from 'node-fetch'
 
+// 定义 API 路由处理函数
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  if (req.method !== 'GET') {
-    return res.status(405).json({ error: 'Method not allowed' })
+  // 检查请求方法是否为 POST
+  if (req.method !== 'POST') {
+    return res.status(405).json({ error: '方法不允许' })
   }
 
-  const { message, conversation_id } = req.query
+  // 从请求体中解构出 message
+  const { message } = req.body
 
+  // 验证 message 是否存在且为字符串
   if (!message || typeof message !== 'string') {
-    return res.status(400).json({ error: 'Message is required' })
-  }
-
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache, no-transform',
-    'Connection': 'keep-alive',
-  })
-
-  const sendEvent = (event: string, data: any) => {
-    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+    return res.status(400).json({ error: '消息是必需的' })
   }
 
   try {
+    // 从环境变量中获取 API 相关信息
     const apiUrl = process.env.COZE_API_URL
     const apiToken = process.env.COZE_API_TOKEN
     const botId = process.env.COZE_BOT_ID
 
+    // 检查必要的环境变量是否存在
     if (!apiUrl || !apiToken || !botId) {
-      throw new Error('Missing required environment variables')
+      throw new Error('缺少必需的环境变量')
     }
-    
-    sendEvent('debug', { message: 'Sending request to Coze API', url: apiUrl })
 
+    // 发送请求到 Coze API
     const apiResponse = await fetch(apiUrl, {
       method: 'POST',
       headers: {
@@ -44,7 +39,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         user_id: "123456789",
         stream: true,
         auto_save_history: true,
-        conversation_id: conversation_id || undefined,
         additional_messages: [
           {
             role: "user",
@@ -55,43 +49,59 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       }),
     })
 
+    // 检查 API 响应是否成功
     if (!apiResponse.ok) {
-      throw new Error(`API response not OK: ${apiResponse.status} ${apiResponse.statusText}`)
+      throw new Error(`API 请求失败: ${apiResponse.statusText}`)
     }
 
-    if (!apiResponse.body) {
-      throw new Error('No response body')
+    // 获取响应流的读取器
+    const reader = apiResponse.body?.getReader()
+    if (!reader) {
+      throw new Error('无法读取响应流')
     }
 
-    sendEvent('debug', 'Started receiving response from Coze API')
+    // 读取并拼接完整的响应
+    let fullResponse = ''
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      const chunk = new TextDecoder().decode(value)
+      fullResponse += chunk
+      console.log('Received chunk:', chunk) // 输出每个接收到的数据块
+    }
 
-    let buffer = ''
-    for await (const chunk of apiResponse.body) {
-      buffer += chunk.toString()
-      let newlineIndex
-      while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
-        const line = buffer.slice(0, newlineIndex).trim()
-        buffer = buffer.slice(newlineIndex + 1)
-        if (line.startsWith('data:')) {
-          const data = line.slice(5).trim()
-          if (data === '[DONE]') {
-            sendEvent('done', '[DONE]')
-          } else {
-            try {
-              const parsedData = JSON.parse(data)
-              sendEvent(parsedData.event, parsedData.data)
-            } catch (error) {
-              console.error('Error parsing event data:', error)
-              sendEvent('error', { message: 'Error parsing event data', error: error.message })
-            }
-          }
+    // 处理响应并返回结果
+    const processedResponse = processResponse(fullResponse)
+    console.log('Processed response:', processedResponse) // 输出处理后的完整响应
+    if (!processedResponse) {
+      console.log('Warning: Processed response is empty')
+    }
+    res.status(200).json({ response: processedResponse })
+  } catch (error) {
+    // 错误处理
+    console.error('Error:', error)
+    res.status(500).json({ error: '发生错误，请重试' })
+  }
+}
+
+// 处理 Coze API 的流式响应
+function processResponse(response: string): string {
+  const lines = response.split('\n')
+  let finalContent = ''
+  for (const line of lines) {
+    if (line.startsWith('data:')) {
+      try {
+        const data = JSON.parse(line.slice(5))
+        console.log('Processed line:', data) // 保留这行用于调试
+        if (data.content) {
+          finalContent += data.content
+        } else if (data.data && data.data.content) {
+          finalContent += data.data.content
         }
+      } catch (error) {
+        console.error('解析响应时出错:', error)
       }
     }
-  } catch (error) {
-    console.error('Error in API route:', error)
-    sendEvent('error', { message: 'Error occurred while processing the request', error: error.message })
-  } finally {
-    res.end()
   }
+  return finalContent
 }
