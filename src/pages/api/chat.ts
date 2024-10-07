@@ -72,7 +72,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     // 处理响应并返回结果
     const processedResponse = processResponse(fullResponse)
-    console.log('Processed response:', processedResponse) // 输出处理后的完整响应
+    console.log('Full API response:', fullResponse)
+    console.log('Processed response:', processedResponse)
     if (!processedResponse) {
       console.log('Warning: Processed response is empty')
     }
@@ -86,22 +87,34 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
 // 处理 Coze API 的流式响应
 function processResponse(response: string): string {
-  const lines = response.split('\n')
-  let finalContent = ''
+  const lines = response.split('\n');
+  let finalContent = '';
+  let currentMessageContent = '';
+  let currentEvent = '';
+
   for (const line of lines) {
-    if (line.startsWith('data:')) {
+    if (line.startsWith('event:')) {
+      currentEvent = line.slice(6).trim();
+    } else if (line.startsWith('data:')) {
       try {
-        const data = JSON.parse(line.slice(5))
-        console.log('Processed line:', data) // 保留这行用于调试
-        if (data.content) {
-          finalContent += data.content
-        } else if (data.data && data.data.content) {
-          finalContent += data.data.content
+        const data = JSON.parse(line.slice(5));
+        console.log('Processed line:', { event: currentEvent, data });
+
+        if (currentEvent === 'conversation.message.delta' && data.content) {
+          // 累积消息内容
+          currentMessageContent += data.content;
+        } else if (currentEvent === 'conversation.message.completed' && data.content) {
+          // 当消息完成时,更新最终内容
+          if (data.type === 'answer') {
+            finalContent = data.content;
+          }
         }
       } catch (error) {
-        console.error('解析响应时出错:', error)
+        console.error('解析响应时出错:', error);
       }
     }
   }
-  return finalContent
+
+  // 如果最终内容为空,使用累积的消息内容
+  return finalContent || currentMessageContent;
 }
